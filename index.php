@@ -1,20 +1,16 @@
 <?php
 /**
- * UniFi API Browser
+ * UniFi API browser
  *
  * This tool is for browsing data that is exposed through Ubiquiti's UniFi Controller API,
- * written in PHP, javascript and the Bootstrap CSS framework.
+ * written in PHP, JavaScript and the Bootstrap CSS framework.
  *
  * Please keep the following in mind:
- * - not all data collections/API endpoints are supported (yet), see the list below of
- *   the currently supported data collections/API endpoints
- * - currently only supports versions 4.x.x of the UniFi Controller software
- * - there is still work to be done to add/improve functionality and usability of this
- *   tool so suggestions/comments are welcome. Please use the github issue list or the
- *   Ubiquiti Community forums for this:
- *   https://community.ubnt.com/t5/UniFi-Wireless/UniFi-API-browser-tool-released/m-p/1392651
+ * - not all data collections/API endpoints are supported (yet), see the list of
+ *   the currently supported data collections/API endpoints in the README.md file
+ * - this tool currently supports versions 4.x and 5.x of the UniFi Controller software
  *
- * VERSION: 1.0.6
+ * VERSION: 1.0.15
  *
  * ------------------------------------------------------------------------------------
  *
@@ -24,13 +20,23 @@
  * with this package in the file LICENSE.md
  *
  */
-
-define('API_BROWSER_VERSION', '1.0.6');
+define('API_BROWSER_VERSION', '1.0.15');
 
 /**
- * to use the PHP $_SESSION array for temporary storage of variables, session_start() is required
+ * in order to use the PHP $_SESSION array for temporary storage of variables, session_start() is required
  */
 session_start();
+
+/**
+ * check whether user has requested to clear the PHP session
+ * - this function can be useful when login errors occur, mostly after upgrades or incorrect credential changes
+ */
+if (isset($_GET['reset_session']) && $_GET['reset_session'] == true) {
+    $_SESSION = array();
+    session_unset();
+    session_destroy();
+    session_start();
+}
 
 /**
  * starting timing of the session here
@@ -46,13 +52,9 @@ $site_id       = '';
 $site_name     = '';
 $selection     = '';
 $output_format = 'json';
-$theme         = 'bootstrap';
 $data          = '';
 $objects_count = '';
 $alert_message = '';
-$cookietimeout = '1800';
-$debug         = FALSE;
-$detected_controller_version = '';
 
 /**
  * load the configuration file
@@ -60,12 +62,17 @@ $detected_controller_version = '';
  * - if the config.php file is unreadable or does not exist, an alert is displayed on the page
  */
 if(!is_readable('config.php')) {
-    $alert_message = '<div class="alert alert-danger" role="alert">The file config.php is not readable or does not exist.'
-                    . '<br>If you have not yet done so, please copy/rename the config.template.php file to config.php and modify'
-                    . 'the contents as required.</div>';
+    $alert_message = '<div class="alert alert-danger" role="alert">The file <code>config.php</code> is not readable or does not exist.'
+                   . '<br>If you have not yet done so, please copy/rename the <code>config.template.php</code> file to <code>config.php</code> and follow '
+                   . 'the instructions inside to enter your credentials and controller details.</div>';
 } else {
-    include('config.php');
+    require_once('config.php');
 }
+
+/**
+ * load the UniFi API client class
+ */
+require_once('phpapi/class.unifi.php');
 
 /**
  * determine whether we have reached the cookie timeout, if so, refresh the PHP session
@@ -92,7 +99,7 @@ $curl_version = $curl_info['version'];
 
 /**
  * process the GET variables and store them in the $_SESSION array
- * if a GET variable is not set, get the values from $_SESSION (if available)
+ * if a GET variable is not set, get the values from the $_SESSION array (if available)
  *
  * Process in this order:
  * - controller_id
@@ -104,11 +111,17 @@ $curl_version = $curl_info['version'];
  * - theme
  */
 if (isset($_GET['controller_id'])) {
+    /**
+     * user has requested a controller switch
+     */
     $controller                = $controllers[$_GET['controller_id']];
     $controller_id             = $_GET['controller_id'];
     $_SESSION['controller']    = $controller;
     $_SESSION['controller_id'] = $_GET['controller_id'];
 
+    /**
+     * clear the variables from the $_SESSION array that are associated with the previous controller
+     */
     unset($_SESSION['site_id']);
     unset($_SESSION['site_name']);
     unset($_SESSION['sites']);
@@ -124,12 +137,13 @@ if (isset($_GET['controller_id'])) {
              * if the user has configured a single controller, we push it's details
              * to the $_SESSION and $controller arrays
              */
-            $_SESSION['controller'] = array('user'     => $controlleruser,
-                                            'password' => $controllerpassword,
-                                            'url'      => $controllerurl,
-                                            'name'     => 'Controller',
-                                            'version'  => $controllerversion
-                                        );
+            $_SESSION['controller'] = array(
+                'user'     => $controlleruser,
+                'password' => $controllerpassword,
+                'url'      => $controllerurl,
+                'name'     => 'Controller',
+                'version'  => $controllerversion
+            );
             $controller = $_SESSION['controller'];
         }
     }
@@ -148,7 +162,7 @@ if (isset($_GET['controller_id'])) {
 }
 
 /**
- * get requested theme or use the theme stored in $_SESSION
+ * get requested theme or use the theme stored in the $_SESSION array
  */
 if (isset($_GET['theme'])) {
     $theme             = $_GET['theme'];
@@ -160,7 +174,7 @@ if (isset($_GET['theme'])) {
 }
 
 /**
- * get requested output_format or use the output_format stored in $_SESSION
+ * get requested output_format or use the output_format stored in the $_SESSION array
  */
 if (isset($_GET['output_format'])) {
     $output_format             = $_GET['output_format'];
@@ -172,7 +186,7 @@ if (isset($_GET['output_format'])) {
 }
 
 /**
- * get requested action or use the action stored in $_SESSION
+ * get requested action or use the action stored in the $_SESSION array
  */
 if (isset($_GET['action'])) {
     $action             = $_GET['action'];
@@ -185,45 +199,44 @@ if (isset($_GET['action'])) {
 
 /**
  * display info message when no controller, site or data collection is selected
- * placed here so they can be overwritten by more "severe" error messages later down
+ * placed here so they can be overwritten by more "severe" error messages later on
  */
 if ($action === '') {
-    $alert_message = '<div class="alert alert-info" role="alert">Please select a data collection/API endpoint from the drop-down menus'
-                    . ' <i class="fa fa-arrow-circle-up"></i></div>';
+    $alert_message = '<div class="alert alert-info" role="alert">Please select a data collection/API endpoint from the dropdown menus'
+                   . ' <i class="fa fa-arrow-circle-up"></i></div>';
 }
 
 if ($site_id === '' && isset($_SESSION['controller'])) {
-    $alert_message = '<div class="alert alert-info" role="alert">Please select a site from the drop-down menu <i class="fa fa-arrow-circle-up">'
-                    . '</i></div>';
+    $alert_message = '<div class="alert alert-info" role="alert">Please select a site from the Sites dropdown menu <i class="fa fa-arrow-circle-up">'
+                   . '</i></div>';
 }
 
 if (!isset($_SESSION['controller'])) {
-    $alert_message = '<div class="alert alert-info" role="alert">Please select a controller from the drop-down menu <i class="fa fa-arrow-circle-up">'
-                    . '</i></div>';
+    $alert_message = '<div class="alert alert-info" role="alert">Please select a controller from the Controllers dropdown menu <i class="fa fa-arrow-circle-up">'
+                   . '</i></div>';
 }
 
 /**
- * load the UniFi API client class and log in to the controller
- * - if an error occurs during the login process, an alert is displayed on the page
- */
-require('phpapi/class.unifi.php');
-
-/**
- * Do this when a controller has been selected and was stored in $_SESSION
+ * Do this when a controller has been selected and was stored in the $_SESSION array
  */
 if (isset($_SESSION['controller'])) {
-    $unifidata        = new unifiapi($controller['user'], $controller['password'], $controller['url'], $site_id, $controller['version']);
-    $unifidata->debug = $debug;
-    $loginresults     = $unifidata->login();
+    /**
+     * create a new instance of the API client class and log in to the UniFi controller
+     * - if an error occurs during the login process, an alert is displayed on the page
+     */
+    $unifidata      = new unifiapi($controller['user'], $controller['password'], $controller['url'], $site_id, $controller['version']);
+    $set_debug_mode = $unifidata->set_debug(trim($debug));
+    $loginresults   = $unifidata->login();
 
     if($loginresults === 400) {
         $alert_message = '<div class="alert alert-danger" role="alert">HTTP response status: 400'
-                        . '<br>This is probably caused by a UniFi controller login failure, please check your credentials in '
-                        . 'config.php. After correcting your credentials, please restart your browser before attempting to use the API Browser tool again.</div>';
+                       . '<br>This is probably caused by a UniFi controller login failure, please check your credentials in '
+                       . 'config.php. After correcting your credentials, please restart your browser or use the <b>Reset PHP session</b> function in the dropdown '
+                       . 'menu on the right, before attempting to use the API browser tool again.</div>';
     }
 
     /**
-     * Get the list of sites managed by the controller (if not already stored in $_SESSION)
+     * Get the list of sites managed by the UniFi controller (if not already stored in the $_SESSION array)
      */
     if (!isset($_SESSION['sites']) || $_SESSION['sites'] === '') {
         $sites  = $unifidata->list_sites();
@@ -233,7 +246,7 @@ if (isset($_SESSION['controller'])) {
     }
 
     /**
-     * Get the version of the controller (if not already stored in $_SESSION or when 'undetected')
+     * Get the version of the UniFi controller (if not already stored in the $_SESSION array or when 'undetected')
      */
     if (!isset($_SESSION['detected_controller_version']) || $_SESSION['detected_controller_version'] === 'undetected') {
         $site_info = $unifidata->stat_sysinfo();
@@ -245,6 +258,7 @@ if (isset($_SESSION['controller'])) {
             $detected_controller_version             = 'undetected';
             $_SESSION['detected_controller_version'] = 'undetected';
         }
+
     } else {
         $detected_controller_version = $_SESSION['detected_controller_version'];
     }
@@ -285,17 +299,21 @@ if (isset($unifidata)) {
             $selection = 'hourly site stats';
             $data      = $unifidata->stat_hourly_site();
             break;
-        case 'stat_sysinfo':
-            $selection = 'sysinfo';
-            $data      = $unifidata->stat_sysinfo();
+        case 'stat_daily_site':
+            $selection = 'daily site stats';
+            $data      = $unifidata->stat_daily_site();
             break;
         case 'stat_hourly_aps':
             $selection = 'hourly ap stats';
             $data      = $unifidata->stat_hourly_aps();
             break;
-        case 'stat_daily_site':
-            $selection = 'daily site stats';
-            $data      = $unifidata->stat_daily_site();
+        case 'stat_daily_aps':
+            $selection = 'daily ap stats';
+            $data      = $unifidata->stat_daily_aps();
+            break;
+        case 'stat_sysinfo':
+            $selection = 'sysinfo';
+            $data      = $unifidata->stat_sysinfo();
             break;
         case 'list_devices':
             $selection = 'list devices';
@@ -322,8 +340,16 @@ if (isset($unifidata)) {
             $data      = $unifidata->list_events();
             break;
         case 'list_alarms':
-            $selection = 'list alerts';
+            $selection = 'list alarms';
             $data      = $unifidata->list_alarms();
+            break;
+        case 'count_alarms':
+            $selection = 'count all alarms';
+            $data      = $unifidata->count_alarms();
+            break;
+        case 'count_active_alarms':
+            $selection = 'count active alarms';
+            $data      = $unifidata->count_alarms(false);
             break;
         case 'list_wlanconf':
             $selection = 'list wlan config';
@@ -361,6 +387,10 @@ if (isset($unifidata)) {
             $selection = 'dynamic dns configuration';
             $data      = $unifidata->list_dynamicdns();
             break;
+        case 'list_current_channels':
+            $selection = 'current channels';
+            $data      = $unifidata->list_current_channels();
+            break;
         case 'list_portforwarding':
             $selection = 'list port forwarding rules';
             $data      = $unifidata->list_portforwarding();
@@ -368,6 +398,10 @@ if (isset($unifidata)) {
         case 'list_portforward_stats':
             $selection = 'list port forwarding stats';
             $data      = $unifidata->list_portforward_stats();
+            break;
+        case 'list_dpi_stats':
+            $selection = 'list DPI stats';
+            $data      = $unifidata->list_dpi_stats();
             break;
         case 'stat_voucher':
             $selection = 'list hotspot vouchers';
@@ -389,29 +423,33 @@ if (isset($unifidata)) {
             $selection = 'all site stats';
             $data      = $unifidata->stat_sites();
             break;
+        case 'list_admins':
+            $selection = 'list_admins';
+            $data      = $unifidata->list_admins();
+            break;
         default:
             break;
     }
 }
 
 /**
- * count the number of objects collected from the controller
+ * count the number of objects collected from the UniFi controller
  */
 if($action!=''){
     $objects_count = count($data);
 }
 
 /**
- * create the url to the css file based on the selected theme (standard Bootstrap or one of the Bootswatch themes)
+ * construct the url for the Bootstrap CSS file based on the selected theme (standard Bootstrap or one of the Bootswatch themes)
  */
 if ($theme === 'bootstrap') {
-    $cssurl = 'https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css';
+    $css_url = 'https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css';
 } else {
-    $cssurl = 'https://maxcdn.bootstrapcdn.com/bootswatch/3.3.6/' . $theme . '/bootstrap.min.css';
+    $css_url = 'https://maxcdn.bootstrapcdn.com/bootswatch/3.3.7/' . trim($theme) . '/bootstrap.min.css';
 }
 
 /**
- * execute timing of data collection from controller
+ * execute timing of data collection from UniFi controller
  */
 $time_2          = microtime(true);
 $time_after_load = $time_2 - $time_start;
@@ -423,7 +461,7 @@ $time_end    = microtime(true);
 $time_total  = $time_end - $time_start;
 $login_perc  = ($time_after_login/$time_total)*100;
 $load_perc   = (($time_after_load - $time_after_login)/$time_total)*100;
-$remain_perc = 100-$login_perc-$load_perc;
+$remain_perc = 100 - $login_perc-$load_perc;
 
 /**
  * shared functions
@@ -439,18 +477,16 @@ function print_output($output_format, $data)
             echo json_encode($data, JSON_PRETTY_PRINT);
             break;
         case 'json_color':
-            echo '<code class="json">';
-            echo json_encode($data, JSON_PRETTY_PRINT);
-            echo '</code>';
+            echo json_encode($data);
             break;
         case 'php_array':
-            print_r ($data);
+            print_r($data);
             break;
         case 'php_var_dump':
-            var_dump ($data);
+            var_dump($data);
             break;
         case 'php_var_export':
-            var_export ($data);
+            var_export($data);
             break;
         default:
             echo json_encode($data, JSON_PRETTY_PRINT);
@@ -459,18 +495,11 @@ function print_output($output_format, $data)
 }
 
 /**
- * function to sort the sites collection
+ * function to sort the sites collection alpabetically by description
  */
 function sites_sort($a, $b)
 {
     return strcmp($a->desc, $b->desc);
-}
-
-if (isset($_SESSION['controller'])) {
-    /**
-     * log off from the UniFi controller API
-     */
-    $logout_results = $unifidata->logout();
 }
 ?>
 <!DOCTYPE html>
@@ -481,9 +510,16 @@ if (isset($_SESSION['controller'])) {
     <title>UniFi API browser</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <!-- Latest compiled and minified versions of Bootstrap, Font-awesome and Highlight.js CSS, loaded from CDN -->
-    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.5.0/css/font-awesome.min.css">
-    <link rel="stylesheet" href="<?php echo $cssurl ?>">
-    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.0.0/styles/default.min.css">
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css" integrity="sha384-wvfXpqpZZVQGK6TAh5PVlGOfQNHSoD2xbE+QkPxCAFlNEevoEH3Sl0sibVcOQVnN" crossorigin="anonymous">
+
+    <!-- Load the appropriate Bootstrap CSS file from CDN -->
+    <link rel="stylesheet" href="<?php echo $css_url ?>">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jquery-jsonview/1.2.3/jquery.jsonview.min.css" integrity="sha256-OhImf+9TMPW5iYXKNT4eRNntf3fCtVYe5jZqo/mrSQA=" crossorigin="anonymous">
+    <link rel="shortcut icon" href="favicon.ico" type="image/x-icon">
+
+    <!-- Load the base64 encoded favicon file  -->
+    <link rel="icon"  type="image/x-icon" sizes="16x16" href="data:image/x-icon;base64,AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAQAABILAAASCwAAAAAAAAAAAADgpAn/4KQJ/+CkCf/gpAn/4KQJ/+CkCf/gpAn/4KQJ/+CkCf/gown/4KQL/+CkDP/enQD/8NOK///////y2Zr/358A/9+fAP/fnwD/358A/9+gAP/foAH/36EB/9+gAP/fnwD/36AA/9+gAv/dmQD/79CB/////////v3//vz4/9+gAP/foAD/36ED/9+hA//engD/3ZsA/92bAP/enAD/36EC/9+hBP/dmgD/8dSM///////+/Pj///////Pbnv/foAD/36EC/96dAf/dmwD/46sc/+i6Rf/ovEr/5bAr/9+fBP/dmgD/8deS///////+/Pb///////LYlf/enAD/36ED/92bAP/jrSf/9eKw//779v/////////////////36MH/9N+q///////+/fn///////HXkv/dmwD/36AD/92bAP/mtj///vv0//////////7////////////////////////////+/fv///////DUiv/dmgD/36AD/9+hAf/iqBv/+/Ti///////+/fr/8tiX/+e3Pf/mszT/7cpx//z36P///v3///////Pbn//cmAD/36EF/9+gAf/foAD/8dWR////////////68Vi/9yWAP/enAL/3pwC/9yXAP/krij//Pbn///////36MP/358A/9+gAf/foAD/36AA//ry2///////9uW7/92aAP/gogX/36ED/9+hA//gowj/3JcA/+3Jc/////////77/+SwK//enAD/36EC/9+gAP/+/Pf//////+7Of//dmgD/4KIE/9+gAP/foAD/36EC/96cAP/lszf////////////ou0n/3ZsA/9+hA//foAD//frz///////w0or/3ZkA/+CiBf/foAD/36AA/9+hA//enAD/5rZA////////////57lE/92bAP/foQP/36AA//jry///////+u/U/9+fB//engD/4KIF/+CiBf/gogX/3JYA//HWk////////frx/+OrHv/enQD/36EC/9+gAP/syG3////////////z253/358C/92ZAP/dmgL/3ZoA/+vEYP/+/fv///////Xgrv/dmwD/36EC/9+gAP/foAD/358C//fmvP////////////rw1v/w0ob/7s16//bluv///v3///////368f/krir/3p0A/9+hAv/foAD/36AA/96eAP/hpRP/9+jA/////////v3///////////////7///////z36f/mtj7/3ZsA/9+hAv/foAD/36AA/9+gAP/foQH/3p4B/96eBf/tyWz/+e3Q//779f/+/fn/+/Pg//HXkv/iqBr/3ZsA/9+hA//foAD/36AA/9+gAP/foAD/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==">
+
     <!-- custom CSS styling -->
     <style>
         body {
@@ -495,7 +531,20 @@ if (isset($_SESSION['controller'])) {
             max-height: 600px;
             overflow-x: hidden;
         }
+
+        #output_panel_loading {
+            color: rgba(0,0,0,.4);
+        }
+
+        .back-to-top {
+            cursor: pointer;
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            display:none;
+        }
     </style>
+    <!-- /custom CSS styling -->
 </head>
 <body>
 <!-- top navbar -->
@@ -507,17 +556,17 @@ if (isset($_SESSION['controller'])) {
                 <span class="icon-bar"></span>
                 <span class="icon-bar"></span>
             </button>
-            <a class="navbar-brand hidden-sm hidden-md" href="index.php">UniFi API browser</a>
+            <a class="navbar-brand hidden-sm hidden-md" href="index.php"><i class="fa fa-search fa-fw fa-lg" aria-hidden="true"></i> UniFi API browser</a>
         </div>
         <div id="navbar-main" class="collapse navbar-collapse">
             <ul class="nav navbar-nav navbar-left">
-                <!-- only show the controllers dropdown when multiple controllers have been configured -->
+                <!-- controllers dropdown, only show when multiple controllers have been configured -->
                 <?php if (isset($controllers)) { ?>
                     <li id="site-menu" class="dropdown">
                         <a id="controller-menu" href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
                             <?php
                             /**
-                             * here we display the controller name, if selected, else just label it
+                             * here we display the UniFi controller name, if selected, else just label it
                              */
                             if (isset($controller)) {
                                 echo $controller['name'];
@@ -531,7 +580,7 @@ if (isset($_SESSION['controller'])) {
                             <li class="dropdown-header">Select a controller</li>
                             <?php
                             /**
-                             * here we loop through the configured controllers
+                             * here we loop through the configured UniFi controllers
                              */
                             foreach ($controllers as $key => $value) {
                                 echo '<li id="controller_' . $key . '"><a href="?controller_id=' . $key . '">' . $value['name'] . '</a></li>' . "\n";
@@ -540,7 +589,8 @@ if (isset($_SESSION['controller'])) {
                          </ul>
                     </li>
                 <?php } ?>
-                <!-- only show the sites dropdown when a controller is selected -->
+                <!-- /controllers dropdown -->
+                <!-- sites dropdown, only show when a controller has been selected -->
                 <?php if (isset($_SESSION['controller'])) { ?>
                     <li id="site-menu" class="dropdown">
                         <a id="site-menu" href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
@@ -562,8 +612,9 @@ if (isset($_SESSION['controller'])) {
                          </ul>
                     </li>
                 <?php } ?>
-                <!-- only show the data collection dropdowns when a site_id is selected -->
-                <?php if ($site_id) { ?>
+                <!-- /sites dropdown -->
+                <!-- data collection dropdowns, only show when a site_id is selected -->
+                <?php if ($site_id && isset($_SESSION['controller'])) { ?>
                     <li id="output-menu" class="dropdown">
                         <a id="output-menu" href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
                             Output
@@ -587,6 +638,7 @@ if (isset($_SESSION['controller'])) {
                             <span class="caret"></span>
                         </a>
                         <ul class="dropdown-menu">
+                            <li class="dropdown-header">Select a data collection</li>
                             <li id="list_clients"><a href="?action=list_clients">list online clients</a></li>
                             <li id="list_guests"><a href="?action=list_guests">list guests</a></li>
                             <li id="list_users"><a href="?action=list_users">list users</a></li>
@@ -603,6 +655,7 @@ if (isset($_SESSION['controller'])) {
                             <span class="caret"></span>
                         </a>
                         <ul class="dropdown-menu">
+                            <li class="dropdown-header">Select a data collection</li>
                             <li id="list_devices"><a href="?action=list_devices">list devices</a></li>
                             <li id="list_wlan_groups"><a href="?action=list_wlan_groups">list wlan groups</a></li>
                             <li id="list_rogueaps"><a href="?action=list_rogueaps">list rogue access points</a></li>
@@ -614,19 +667,26 @@ if (isset($_SESSION['controller'])) {
                             <span class="caret"></span>
                         </a>
                         <ul class="dropdown-menu">
+                            <li class="dropdown-header">Select a data collection</li>
                             <li id="stat_hourly_site"><a href="?action=stat_hourly_site">hourly site stats</a></li>
                             <li id="stat_daily_site"><a href="?action=stat_daily_site">daily site stats</a></li>
+                            <!-- all sites stats, only to be displayed when we have detected a capable controller version -->
                             <?php if ($detected_controller_version != 'undetected' && version_compare($detected_controller_version, '5.2.9') >= 0) { ?>
                                 <li id="stat_sites"><a href="?action=stat_sites">all sites stats</a></li>
                             <?php } ?>
+                            <!-- /all sites stats -->
                             <li role="separator" class="divider"></li>
                             <li id="stat_hourly_aps"><a href="?action=stat_hourly_aps">hourly access point stats</a></li>
+                            <li id="stat_daily_aps"><a href="?action=stat_daily_aps">daily access point stats</a></li>
                             <li role="separator" class="divider"></li>
                             <li id="list_health"><a href="?action=list_health">site health metrics</a></li>
+                            <!-- site dashboard metrics, only to be displayed when we have detected a capable controller version -->
                             <?php if ($detected_controller_version != 'undetected' && version_compare($detected_controller_version, '4.9.1') >= 0) { ?>
                                 <li id="list_dashboard"><a href="?action=list_dashboard">site dashboard metrics</a></li>
                             <?php } ?>
+                            <!-- /site dashboard metrics -->
                             <li id="list_portforward_stats"><a href="?action=list_portforward_stats">port forwarding stats</a></li>
+                            <li id="list_dpi_stats"><a href="?action=list_dpi_stats">DPI stats</a></li>
                         </ul>
                     </li>
                     <li id="hotspot-menu" class="dropdown">
@@ -635,6 +695,7 @@ if (isset($_SESSION['controller'])) {
                             <span class="caret"></span>
                         </a>
                         <ul class="dropdown-menu">
+                            <li class="dropdown-header">Select a data collection</li>
                             <li id="stat_voucher"><a href="?action=stat_voucher">stat vouchers</a></li>
                             <li id="stat_payment"><a href="?action=stat_payment">stat payments</a></li>
                             <li role="separator" class="divider"></li>
@@ -647,11 +708,13 @@ if (isset($_SESSION['controller'])) {
                             <span class="caret"></span>
                         </a>
                         <ul class="dropdown-menu">
+                            <li class="dropdown-header">Select a data collection</li>
                             <li id="list_sites"><a href="?action=list_sites">list sites on this controller</a></li>
                             <li id="stat_sysinfo"><a href="?action=stat_sysinfo">sysinfo</a></li>
                             <li id="list_self"><a href="?action=list_self">self</a></li>
                             <li role="separator" class="divider"></li>
                             <li id="list_settings"><a href="?action=list_settings">list site settings</a></li>
+                            <li id="list_admins"><a href="?action=list_admins">list admins for current site</a></li>
                             <li role="separator" class="divider"></li>
                             <li id="list_wlanconf"><a href="?action=list_wlanconf">list wlan configuration</a></li>
                             <li role="separator" class="divider"></li>
@@ -660,6 +723,7 @@ if (isset($_SESSION['controller'])) {
                             <li id="list_networkconf"><a href="?action=list_networkconf">list network configuration</a></li>
                             <li id="list_portconf"><a href="?action=list_portconf">list port configuration</a></li>
                             <li id="list_portforwarding"><a href="?action=list_portforwarding">list port forwarding rules</a></li>
+                            <li id="list_current_channels"><a href="?action=list_current_channels">list current channels</a></li>
                             <li id="list_dynamicdns"><a href="?action=list_dynamicdns">dynamic DNS configuration</a></li>
                         </ul>
                     </li>
@@ -669,11 +733,15 @@ if (isset($_SESSION['controller'])) {
                             <span class="caret"></span>
                         </a>
                         <ul class="dropdown-menu">
-                            <li id="list_alarms"><a href="?action=list_alarms">list alerts</a></li>
+                            <li class="dropdown-header">Select a data collection</li>
+                            <li id="list_alarms"><a href="?action=list_alarms">list alarms</a></li>
+                            <li id="count_alarms"><a href="?action=count_alarms">count all alarms</a></li>
+                            <li id="count_active_alarms"><a href="?action=count_active_alarms">count active alarms</a></li>
                             <li id="list_events"><a href="?action=list_events">list events</a></li>
                         </ul>
                     </li>
                 <?php } ?>
+                <!-- /data collection dropdowns -->
             </ul>
             <ul class="nav navbar-nav navbar-right">
                 <li id="theme-menu" class="dropdown">
@@ -682,7 +750,7 @@ if (isset($_SESSION['controller'])) {
                     </a>
                     <ul class="dropdown-menu">
                         <li class="dropdown-header">Select a theme</li>
-                        <li id="bootstrap"><a href="?theme=bootstrap">default Bootstrap</a></li>
+                        <li id="bootstrap"><a href="?theme=bootstrap">Bootstrap (default)</a></li>
                         <li id="cerulean"><a href="?theme=cerulean">Cerulean</a></li>
                         <li id="cosmo"><a href="?theme=cosmo">Cosmo</a></li>
                         <li id="cyborg"><a href="?theme=cyborg">Cyborg</a></li>
@@ -700,65 +768,80 @@ if (isset($_SESSION['controller'])) {
                         <li id="united"><a href="?theme=united">United</a></li>
                         <li id="yeti"><a href="?theme=yeti">Yeti</a></li>
                         <li role="separator" class="divider"></li>
-                        <li id="info" data-toggle="modal" data-target="#aboutModal"><a href="#"><i class="fa fa-info-circle"></i> About</a></li>
+                        <li id="reset_session" data-toggle="tooltip" data-placement="top" data-original-title="In some cases this will fix login errors (e.g. empty sites list)">
+                            <a href="?reset_session=true"><i class="fa fa-refresh"></i> Reset PHP session</a>
+                        </li>
+                        <li role="separator" class="divider"></li>
+                        <li id="info" data-toggle="modal" data-target="#about_modal"><a href="#"><i class="fa fa-info-circle"></i> About UniFi API browser</a></li>
                     </ul>
                 </li>
             </ul>
         </div><!-- /.nav-collapse -->
     </div><!-- /.container-fluid -->
-</nav><!-- /navbar-example -->
+</nav><!-- /top navbar -->
 <div class="container-fluid">
-    <div id="alertPlaceholder">
-        <?php echo $alert_message ?>
+    <div id="alert_placeholder"></div>
+    <!-- data-panel, only to be displayed once a controller has been configured and an action has been selected, while loading we display a temp div -->
+    <?php if (isset($_SESSION['controller']) && $action) { ?>
+    <div id="output_panel_loading" class="text-center">
+        <br>
+        <h2><i class="fa fa-spinner fa-spin fa-fw"></i></h2>
     </div>
-    <div class="panel panel-default">
+    <div id="output_panel" class="panel panel-default" style="display: none">
         <div class="panel-heading">
+            <!-- site info, only to be displayed when a site has been selected -->
             <?php if ($site_id) { ?>
-                site id: <span class="label label-primary"><?php echo $site_id ?></span>
-                site name: <span class="label label-primary"><?php echo $site_name ?></span>
+                site id: <span id="span_site_id" class="label label-primary"></span>
+                site name: <span id="span_site_name" class="label label-primary"></span>
             <?php } ?>
+            <!-- /site info -->
+            <!-- selection, only to be displayed when a selection has been made -->
             <?php if ($selection) { ?>
-                collection: <span class="label label-primary"><?php echo $selection ?></span>
+                collection: <span id="span_selection" class="label label-primary"></span>
             <?php } ?>
-            output: <span class="label label-primary"><?php echo $output_format ?></span>
+            <!-- /selection -->
+            output: <span id="span_output_format" class="label label-primary"></span>
+            <!-- objects_count, only to be displayed when we have results -->
             <?php if ($objects_count !== '') { ?>
-                # of objects: <span class="badge"><?php echo $objects_count ?></span>
+                # of objects: <span id="span_objects_count" class="badge"></span>
             <?php } ?>
+            <!-- /objects_count -->
         </div>
         <div class="panel-body">
             <!--only display panel content when an action has been selected-->
-            <?php if ($action !== '') { ?>
-            <!-- present the timing results using an HTML5 progress bar -->
-            total elapsed time: <?php echo $time_total ?> seconds<br>
-            <div class="progress">
-                <div class="progress-bar progress-bar-warning" role="progressbar" aria-valuenow="<?php echo $login_perc ?>"
-                aria-valuemin="0" aria-valuemax="100" style="width: <?php echo $login_perc ?>%;" data-toggle="tooltip"
-                data-placement="bottom" data-original-title="<?php echo $time_after_login ?> seconds">
-                    API login time
+            <?php if ($action !== '' && isset($_SESSION['controller'])) { ?>
+                <!-- present the timing results using an HTML5 progress bar -->
+                <span id="span_elapsed_time"></span>
+                <br>
+                <div class="progress">
+                    <div id="timing_login_perc" class="progress-bar progress-bar-warning" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-toggle="tooltip" data-placement="bottom"></div>
+                    <div id="timing_load_perc" class="progress-bar progress-bar-success" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-toggle="tooltip" data-placement="bottom"></div>
+                    <div id="timing_remain_perc" class="progress-bar progress-bar-primary" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-toggle="tooltip" data-placement="bottom"></div>
                 </div>
-                <div class="progress-bar progress-bar-success" role="progressbar" aria-valuenow="<?php echo $load_perc ?>"
-                aria-valuemin="0" aria-valuemax="100" style="width: <?php echo $load_perc ?>%;" data-toggle="tooltip"
-                data-placement="bottom" data-original-title="<?php echo ($time_after_load - $time_after_login) ?> seconds">
-                    data load time
+                <div id="toggle_button" style="display: none">
+                    <button id="toggle-btn" type="button" class="btn btn-primary btn-xs"><i id="i_toggle-btn" class="fa fa-minus" aria-hidden="true"></i> Expand/collapse</button>
+                    <button id="toggle-level2-btn" type="button" class="btn btn-primary btn-xs"><i id="i_toggle-level2-btn" class="fa fa-minus" aria-hidden="true"></i> Expand/collapse level 2</button>
+                    <br><br>
                 </div>
-                <div class="progress-bar progress-bar-primary" role="progressbar" aria-valuenow="<?php echo $remain_perc ?>"
-                aria-valuemin="0" aria-valuemax="100" style="width: <?php echo $remain_perc ?>%;" data-toggle="tooltip"
-                data-placement="bottom" data-original-title="PHP overhead: <?php echo $remain_perc ?> seconds">
-                    PHP overhead
+                <div id="output" style="display: none">
+                    <pre id="pre_output"><?php print_output($output_format, $data) ?></pre>
                 </div>
-            </div>
-            <pre><?php print_output($output_format, $data) ?></pre>
             <?php } ?>
         </div>
     </div>
+    <?php } ?>
+    <!-- /data-panel -->
 </div>
+<!-- Back to Top button element -->
+<a id="back-to-top" href="#" class="btn btn-primary back-to-top" role="button" title="Back to top" data-toggle="tooltip" data-placement="left"><i class="fa fa-chevron-up" aria-hidden="true"></i></a>
+<!-- /Back to Top button element -->
 <!-- Modal -->
-<div class="modal fade" id="aboutModal" tabindex="-1" role="dialog" aria-labelledby="myModalLabel">
+<div class="modal fade" id="about_modal" tabindex="-1" role="dialog">
     <div class="modal-dialog" role="document">
         <div class="modal-content">
             <div class="modal-header">
                 <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
-                <h4 class="modal-title" id="myModalLabel"><i class="fa fa-info-circle"></i> About UniFi API Browser</h4>
+                <h4 class="modal-title" id="myModalLabel"><i class="fa fa-info-circle"></i> About UniFi API browser</h4>
             </div>
             <div class="modal-body">
                 <div class="row">
@@ -766,41 +849,40 @@ if (isset($_SESSION['controller'])) {
                         A tool for browsing the data collections which are exposed through Ubiquiti's UniFi Controller API.
                     </div>
                 </div>
-                <hr>
                 <div class="row">
-                    <div class="col-sm-8 col-sm-offset-2"><a href="https://github.com/malle-pietje/UniFi-API-browser"
+                    <div class="col-sm-8 col-sm-offset-1"><a href="http://www.dereferer.org/?https://github.com/malle-pietje/UniFi-API-browser"
                     target="_blank">UniFi API browser on Github</a></div>
-                    <div class="col-sm-8 col-sm-offset-2"><a href="http://community.ubnt.com/t5/UniFi-Wireless/UniFi-API-browser-tool-updates-and-discussion/m-p/1392651#U1392651"
+                    <div class="col-sm-8 col-sm-offset-1"><a href="http://www.dereferer.org/?http://community.ubnt.com/t5/UniFi-Wireless/UniFi-API-browser-tool-updates-and-discussion/m-p/1392651#U1392651"
                     target="_blank">UniFi API browser on Ubiquiti Community forum</a></div>
                 </div>
                 <hr>
                 <dl class="dl-horizontal col-sm-offset-1">
-                    <dt>API Browser version</dt>
-                    <dd><span class="label label-primary"><?php echo API_BROWSER_VERSION ?></span></dd>
+                    <dt>API browser version</dt>
+                    <dd><span id="span_api_browser_version" class="label label-primary"></span> <span id="span_api_browser_update" class="label label-success"><i class="fa fa-spinner fa-spin fa-fw"></i> checking for updates</span></dd>
                     <dt>API Class version</dt>
-                    <dd><span class="label label-primary"><?php echo API_CLASS_VERSION ?></span></dd>
+                    <dd><span id="span_api_class_version" class="label label-primary"></span></dd>
                 </dl>
                 <hr>
                 <dl class="dl-horizontal col-sm-offset-1">
                     <dt>controller user</dt>
-                    <dd><span class="label label-primary"><?php if (isset($_SESSION['controller'])) { echo $controller['user']; } ?></span></dd>
+                    <dd><span id="span_controller_user" class="label label-primary"></span></dd>
                     <dt>controller url</dt>
-                    <dd><span class="label label-primary"><?php if (isset($_SESSION['controller'])) { echo $controller['url']; } ?></span></dd>
+                    <dd><span id="span_controller_url" class="label label-primary"></span></dd>
                     <dt>version detected</dt>
-                    <dd><span class="label label-primary"><?php if (isset($_SESSION['controller'])) { echo $detected_controller_version; } ?></span></dd>
+                    <dd><span id="span_controller_version" class="label label-primary"></span></dd>
                 </dl>
                 <hr>
                 <dl class="dl-horizontal col-sm-offset-1">
                     <dt>PHP version</dt>
-                    <dd><span class="label label-primary"><?php echo (phpversion()) ?></span></dd>
+                    <dd><span id="span_php_version" class="label label-primary"></span></dd>
                     <dt>PHP memory_limit</dt>
-                    <dd><span class="label label-primary"><?php echo (ini_get('memory_limit')) ?></span></dd>
+                    <dd><span id="span_memory_limit" class="label label-primary"></span></dd>
                     <dt>PHP memory used</dt>
-                    <dd><span class="label label-primary"><?php echo round(memory_get_peak_usage(false)/1024/1024, 2) . 'M' ?></span></dd>
+                    <dd><span id="span_memory_used" class="label label-primary"></span></dd>
                     <dt>cURL version</dt>
-                    <dd><span class="label label-primary"><?php echo $curl_version ?></span></dd>
+                    <dd><span id="span_curl_version" class="label label-primary"></span></dd>
                     <dt>operating system</dt>
-                    <dd><span class="label label-primary"><?php echo (php_uname('s') . ' ' . php_uname('r')) ?></span></dd>
+                    <dd><span id="span_os_version" class="label label-primary"></span></dd>
                 </dl>
             </div>
             <div class="modal-footer">
@@ -809,33 +891,189 @@ if (isset($_SESSION['controller'])) {
         </div>
     </div>
 </div>
-<!-- Latest compiled and minified JavaScript versions, loaded from CDN's -->
-<script src="https://code.jquery.com/jquery-2.2.0.min.js"></script>
-<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js"></script>
-<script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.0.0/highlight.min.js"></script>
+<!-- Latest compiled and minified JavaScript versions, loaded from CDN's, now including Source Integrity hashes, just in case... -->
+<script src="https://code.jquery.com/jquery-2.2.4.min.js" integrity="sha256-BbhdlvQf/xTY9gja0Dq3HiwQF8LaCRTXxZKRutelT44=" crossorigin="anonymous"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js" integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-jsonview/1.2.3/jquery.jsonview.min.js" integrity="sha256-yB+xHoEi5PoOnEAgHNbRMIbN4cNtOXAmBzkhNE/tQlI=" crossorigin="anonymous"></script>
 <script>
+$(document).ready(function() {
     /**
-    * initialise the Highlighting.js library
-    */
-    hljs.initHighlightingOnLoad();
-</script>
-<script>
-    /**
-    * highlight selected options in the pull down menus
-    * for $action, $site_id, $theme and $output_format:
-    */
-    $('#<?php echo $theme ?>').addClass('active').find('a').append(' <i class="fa fa-check"></i>');
-    $('#<?php echo $action ?>').addClass('active').find('a').append(' <i class="fa fa-check"></i>');
-    $('#<?php echo $site_id ?>').addClass('active').find('a').append(' <i class="fa fa-check"></i>');
-    $('#<?php echo $output_format ?>').addClass('active').find('a').append(' <i class="fa fa-check"></i>');
-    $('#controller_<?php echo $controller_id ?>').addClass('active').find('a').append(' <i class="fa fa-check"></i>');
+     * we hide the loading div and show the output panel
+     */
+    $("#output_panel_loading").hide();
+    $("#output_panel").show();
 
     /**
-    * enable Bootstrap tooltips
-    */
+     * populate some Javascript variables with PHP output for cleaner code
+     */
+    var alert_message       = '<?php echo $alert_message ?>';
+    var action              = '<?php echo $action ?>';
+    var site_id             = '<?php echo $site_id ?>';
+    var site_name           = '<?php echo $site_name ?>';
+    var controller_id       = '<?php echo $controller_id ?>';
+    var output_format       = '<?php echo $output_format ?>';
+    var selection           = '<?php echo $selection ?>';
+    var objects_count       = '<?php echo $objects_count ?>';
+    var timing_login_perc   = '<?php echo $login_perc ?>';
+    var time_after_login    = '<?php echo $time_after_login ?>';
+    var timing_load_perc    = '<?php echo $load_perc ?>';
+    var time_for_load       = '<?php echo ($time_after_load - $time_after_login) ?>';
+    var timing_remain_perc  = '<?php echo $remain_perc ?>';
+    var timing_total_time   = '<?php echo $time_total ?>';
+    var theme               = '<?php echo $theme ?>';
+    var php_version         = '<?php echo (phpversion()) ?>';
+    var memory_limit        = '<?php echo (ini_get('memory_limit')) ?>';
+    var memory_used         = '<?php echo round(memory_get_peak_usage(false)/1024/1024, 2) . 'M' ?>';
+    var curl_version        = '<?php echo $curl_version ?>';
+    var os_version          = '<?php echo (php_uname('s') . ' ' . php_uname('r')) ?>';
+    var api_browser_version = '<?php echo API_BROWSER_VERSION ?>';
+    var api_class_version   = '<?php echo API_CLASS_VERSION ?>';
+    var controller_user     = '<?php if (isset($_SESSION['controller'])) { echo $controller['user']; } ?>';
+    var controller_url      = '<?php if (isset($_SESSION['controller'])) { echo $controller['url']; } ?>';
+    var controller_version  = '<?php if (isset($_SESSION['controller'])) { echo $detected_controller_version; } ?>';
+
+    /**
+     * update dynamic elements in the DOM using some of the above variables
+     */
+    $('#alert_placeholder').html(alert_message);
+    $('#span_site_id').html(site_id);
+    $('#span_site_name').html(site_name);
+    $('#span_output_format').html(output_format);
+    $('#span_selection').html(selection);
+    $('#span_objects_count').html(objects_count);
+
+    $('#span_elapsed_time').html('total elapsed time: ' + timing_total_time + ' seconds');
+
+    $('#timing_login_perc').attr('aria-valuenow', timing_login_perc);
+    $('#timing_login_perc').css('width', timing_login_perc + '%');
+    $('#timing_login_perc').attr('data-original-title', time_after_login + ' seconds');
+    $('#timing_login_perc').html('API login time');
+
+    $('#timing_load_perc').attr('aria-valuenow', timing_load_perc);
+    $('#timing_load_perc').css('width', timing_load_perc + '%');
+    $('#timing_load_perc').attr('data-original-title', time_for_load + ' seconds');
+    $('#timing_load_perc').html('data load time');
+
+    $('#timing_remain_perc').attr('aria-valuenow', timing_remain_perc);
+    $('#timing_remain_perc').css('width', timing_remain_perc + '%');
+    $('#timing_remain_perc').attr('data-original-title', 'PHP overhead: ' + timing_remain_perc + '%');
+    $('#timing_remain_perc').html('PHP overhead');
+
+    $('#span_api_browser_version').html(api_browser_version);
+    $('#span_api_class_version').html(api_class_version);
+    $('#span_controller_user').html(controller_user);
+    $('#span_controller_url').html(controller_url);
+    $('#span_controller_version').html(controller_version);
+    $('#span_php_version').html(php_version);
+    $('#span_curl_version').html(curl_version);
+    $('#span_os_version').html(os_version);
+    $('#span_memory_limit').html(memory_limit);
+    $('#span_memory_used').html(memory_used);
+
+    /**
+     * highlight and mark the selected options in the dropdown menus for $controller_id, $action, $site_id, $theme and $output_format
+     *
+     * NOTE:
+     * these actions are performed conditionally
+     */
+    (action != '') ? $('#' + action).addClass('active').find('a').append(' <i class="fa fa-check"></i>') : false;
+    (site_id != '') ? $('#' + site_id).addClass('active').find('a').append(' <i class="fa fa-check"></i>') : false;
+    (controller_id != '') ? $('#controller_' + controller_id).addClass('active').find('a').append(' <i class="fa fa-check"></i>') : false;
+
+    /**
+     * these two options have default values so no tests needed here
+     */
+    $('#' + output_format).addClass('active').find('a').append(' <i class="fa fa-check"></i>');
+    $('#' + theme).addClass('active').find('a').append(' <i class="fa fa-check"></i>');
+
+    /**
+     * initialise the jquery-jsonview library, only when required
+     */
+    if (output_format == 'json_color') {
+        $('#toggle_button').show();
+        $('#pre_output').JSONView($('#pre_output').text());
+
+        /**
+         * the expand/collapse toggle buttons to control the json view
+         */
+        $('#toggle-btn').on('click', function() {
+            $('#pre_output').JSONView('toggle');
+            $('#i_toggle-btn').toggleClass('fa-plus').toggleClass('fa-minus');
+            $(this).blur();
+        });
+
+        $('#toggle-level2-btn').on('click', function() {
+            $('#pre_output').JSONView('toggle', 2);
+            $('#i_toggle-level2-btn').toggleClass('fa-plus').toggleClass('fa-minus');
+            $(this).blur();
+        });
+    }
+
+    /**
+     * only now do we display the output
+     */
+    $('#output').show();
+
+    /**
+     * enable Bootstrap tooltips
+     */
     $(function () {
         $('[data-toggle="tooltip"]').tooltip()
     })
+
+    /**
+     * check latest version of API browser tool and inform user when it's more recent than the current,
+     * but only when the "about" modal is opened
+     */
+    $('#about_modal').on('shown.bs.modal', function (e) {
+        $.getJSON('https://api.github.com/repos/malle-pietje/UniFi-API-browser/releases/latest', function(external) {
+            if (api_browser_version != '' && typeof(external.tag_name) !== 'undefined') {
+                if (api_browser_version < external.tag_name.substring(1)) {
+                    $('#span_api_browser_update').html('an update is available: ' + external.tag_name.substring(1));
+                    $('#span_api_browser_update').removeClass('label-success').addClass('label-warning');
+                } else {
+                    $('#span_api_browser_update').html('up to date');
+                }
+            }
+        }).fail(function(d, textStatus, error) {
+            $('#span_api_browser_update').html('error checking updates');
+            $('#span_api_browser_update').removeClass('label-success').addClass('label-danger');
+            console.error("getJSON failed, status: " + textStatus + ", error: " + error);
+        });;
+    })
+
+    /**
+     * and reset the span again when the "about" modal is closed
+     */
+    $('#about_modal').on('hidden.bs.modal', function (e) {
+        $('#span_api_browser_update').html('<i class="fa fa-spinner fa-spin fa-fw"></i> checking for updates</span>');
+        $('#span_api_browser_update').removeClass('label-warning').removeClass('label-danger').addClass('label-success');
+    })
+
+    /**
+     * manage display of the "back to top" button element
+     */
+    $(window).scroll(function () {
+        if ($(this).scrollTop() > 50) {
+            $('#back-to-top').fadeIn();
+        } else {
+            $('#back-to-top').fadeOut();
+        }
+    });
+
+    /**
+     * scroll body to 0px (top) on click on the "back to top" button
+     */
+    $('#back-to-top').click(function () {
+        $('#back-to-top').tooltip('hide');
+        $('body,html').animate({
+            scrollTop: 0
+        }, 500);
+        return false;
+    });
+
+    $('#back-to-top').tooltip('show');
+});
 </script>
 </body>
 </html>
